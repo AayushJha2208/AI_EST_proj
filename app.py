@@ -1,179 +1,224 @@
-# train_and_save_model.py
-# Run this script ONCE to train the LSTM model and save it along with the scaler.
-# Output: binary_model.keras  +  scaler.pkl
-
+import streamlit as st
 import numpy as np
 import pandas as pd
 import pickle
-import os
-from sklearn import preprocessing
-from sklearn.metrics import confusion_matrix, recall_score, precision_score
-from tensorflow import keras
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Dense, Dropout, LSTM
-from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.metrics import confusion_matrix, precision_score, recall_score, f1_score
 
-np.random.seed(1234)
+st.set_page_config(page_title="Predictive Maintenance", page_icon="⚙️", layout="wide")
 
-# ─────────────────────────────────────────
-# 1.  LOAD DATA
-# ─────────────────────────────────────────
-print("Loading data...")
-train_df = pd.read_csv('PM_train.txt', sep=" ", header=None)
-test_df  = pd.read_csv('PM_test.txt',  sep=" ", header=None)
-truth_df = pd.read_csv('PM_truth.txt', sep=" ", header=None)
+# ── Load everything from single pkl ──────────────────────────────────────────
+@st.cache_resource(show_spinner=False)
+def load_bundle():
+    with open('model_bundle.pkl', 'rb') as f:
+        bundle = pickle.load(f)
 
-train_df.dropna(axis=1, inplace=True)
-test_df.dropna(axis=1, inplace=True)
-truth_df.dropna(axis=1, inplace=True)
+    # Rebuild model from saved config + weights
+    from tensorflow.keras.models import model_from_config
+    model = model_from_config(bundle['model_config'])
+    model.compile(loss='binary_crossentropy', optimizer='adam', metrics=['accuracy'])
+    model.set_weights(bundle['model_weights'])
 
-cols_names = ['id','cycle','setting1','setting2','setting3',
-              's1','s2','s3','s4','s5','s6','s7','s8','s9','s10',
-              's11','s12','s13','s14','s15','s16','s17','s18','s19','s20','s21']
-train_df.columns = cols_names
-test_df.columns  = cols_names
+    return model, bundle
 
-# ─────────────────────────────────────────
-# 2.  PREPROCESSING – TRAIN
-# ─────────────────────────────────────────
-train_df.sort_values(['id','cycle'], inplace=True)
-test_df.sort_values(['id','cycle'],  inplace=True)
+try:
+    model, bundle = load_bundle()
+    SCALER          = bundle['scaler']
+    COLS_NORMALIZE  = bundle['cols_normalize']
+    SEQUENCE_COLS   = bundle['sequence_cols']
+    SEQUENCE_LENGTH = bundle['sequence_length']
+    W1              = bundle['w1']
+    assets_ok = True
+except Exception as e:
+    assets_ok = False
+    load_err  = str(e)
 
-rul = pd.DataFrame(train_df.groupby('id')['cycle'].max()).reset_index()
-rul.columns = ['id','max']
-train_df = train_df.merge(rul, on=['id'], how='left')
-train_df['RUL'] = train_df['max'] - train_df['cycle']
-train_df.drop('max', axis=1, inplace=True)
+# ── Helpers ───────────────────────────────────────────────────────────────────
+def preprocess(raw_df):
+    df = raw_df.copy()
+    col_names = ['id','cycle','setting1','setting2','setting3'] + [f's{i}' for i in range(1,22)]
+    df.columns = col_names[:len(df.columns)]
+    df.sort_values(['id','cycle'], inplace=True)
+    df['cycle_norm'] = df['cycle']
+    norm = pd.DataFrame(
+        SCALER.transform(df[COLS_NORMALIZE]),
+        columns=COLS_NORMALIZE, index=df.index)
+    df = df[df.columns.difference(COLS_NORMALIZE)].join(norm)
+    return df
 
-w1 = 30
-train_df['failure_within_w1'] = np.where(train_df['RUL'] <= w1, 1, 0)
-train_df['cycle_norm'] = train_df['cycle']
+def make_sequences(df):
+    seqs, ids = [], []
+    for eid in df['id'].unique():
+        edf = df[df['id'] == eid]
+        if len(edf) >= SEQUENCE_LENGTH:
+            seqs.append(edf[SEQUENCE_COLS].values[-SEQUENCE_LENGTH:])
+            ids.append(eid)
+    return np.asarray(seqs).astype(np.float32), ids
 
-cols_normalize = train_df.columns.difference(['id','cycle','RUL','failure_within_w1'])
-min_max_scaler = preprocessing.MinMaxScaler()
-norm_train_df  = pd.DataFrame(
-    min_max_scaler.fit_transform(train_df[cols_normalize]),
-    columns=cols_normalize, index=train_df.index)
+def predict(seqs):
+    probs = model.predict(seqs, verbose=0).flatten()
+    preds = (probs > 0.5).astype(int)
+    return probs, preds
 
-join_df   = train_df[['id','cycle','RUL','failure_within_w1']].join(norm_train_df)
-train_df  = join_df.reindex(columns=train_df.columns)
+# ── Sidebar ───────────────────────────────────────────────────────────────────
+with st.sidebar:
+    st.markdown("## ⚙️ Status")
+    if assets_ok:
+        st.success("Model loaded ✓")
+        st.markdown(f"**Sequence length:** `{SEQUENCE_LENGTH}`")
+        st.markdown(f"**Failure window:** `{W1}` cycles")
+        st.markdown(f"**Features:** `{len(SEQUENCE_COLS)}`")
+    else:
+        st.error("model_bundle.pkl not found")
+        st.caption(load_err)
 
-# ─────────────────────────────────────────
-# 3.  PREPROCESSING – TEST
-# ─────────────────────────────────────────
-test_df['cycle_norm'] = test_df['cycle']
-norm_test_df = pd.DataFrame(
-    min_max_scaler.transform(test_df[cols_normalize]),
-    columns=cols_normalize, index=test_df.index)
-test_join_df = test_df[test_df.columns.difference(cols_normalize)].join(norm_test_df)
-test_df = test_join_df.reindex(columns=test_df.columns).reset_index(drop=True)
+    st.markdown("---")
+    st.markdown("**Input format:** space-separated `.txt`, no header  \n`id · cycle · setting1-3 · s1-s21`")
 
-rul_test = pd.DataFrame(test_df.groupby('id')['cycle'].max()).reset_index()
-rul_test.columns = ['id','max']
-truth_df.columns = ['additional_rul']
-truth_df['id']   = truth_df.index + 1
-truth_df['max']  = rul_test['max'] + truth_df['additional_rul']
-truth_df.drop('additional_rul', axis=1, inplace=True)
+# ── Main ──────────────────────────────────────────────────────────────────────
+st.title("⚙️ Predictive Maintenance — LSTM")
+st.caption("Will the engine fail within the next 30 cycles?")
+st.markdown("---")
 
-test_df = test_df.merge(truth_df, on=['id'], how='left')
-test_df['RUL'] = test_df['max'] - test_df['cycle']
-test_df.drop('max', axis=1, inplace=True)
-test_df['failure_within_w1'] = np.where(test_df['RUL'] <= w1, 1, 0)
+if not assets_ok:
+    st.error("Could not load model_bundle.pkl — check sidebar.")
+    st.stop()
 
-# ─────────────────────────────────────────
-# 4.  SEQUENCE GENERATION
-# ─────────────────────────────────────────
-sequence_length = 50
-sensor_cols    = ['s' + str(i) for i in range(1, 22)]
-sequence_cols  = ['setting1','setting2','setting3','cycle_norm'] + sensor_cols
+tab1, tab2 = st.tabs(["🔍 Predict", "📊 Evaluate"])
 
-def sequence_generator(df, seq_len, seq_cols):
-    arr = df[seq_cols].values
-    n   = arr.shape[0]
-    for start, stop in zip(range(0, n - seq_len), range(seq_len, n)):
-        yield arr[start:stop, :]
+# ─── TAB 1: PREDICT ──────────────────────────────────────────────────────────
+with tab1:
+    st.subheader("Upload test file")
+    f = st.file_uploader("PM_test.txt — space separated, no header", type=["txt","csv"])
 
-def label_generator(df, seq_len, label):
-    arr = df[label].values
-    return arr[seq_len:arr.shape[0], :]
+    if f:
+        raw = pd.read_csv(f, sep=r"\s+", header=None)
+        raw.dropna(axis=1, inplace=True)
 
-print("Generating sequences...")
-seq_gen = (list(sequence_generator(train_df[train_df['id']==id], sequence_length, sequence_cols))
-           for id in train_df['id'].unique())
-seq_set = np.concatenate(list(seq_gen)).astype(np.float32)
+        try:
+            df        = preprocess(raw)
+            seqs, ids = make_sequences(df)
+        except Exception as e:
+            st.error(f"Preprocessing error: {e}")
+            st.stop()
 
-label_gen = [label_generator(train_df[train_df['id']==id], sequence_length, ['failure_within_w1'])
-             for id in train_df['id'].unique()]
-label_set = np.concatenate(label_gen).astype(np.float32)
+        if len(seqs) == 0:
+            st.warning(f"No engine has ≥ {SEQUENCE_LENGTH} cycles.")
+            st.stop()
 
-print(f"seq_set shape : {seq_set.shape}")
-print(f"label_set shape: {label_set.shape}")
+        probs, preds = predict(seqs)
 
-# ─────────────────────────────────────────
-# 5.  BUILD & TRAIN LSTM
-# ─────────────────────────────────────────
-features_dim = seq_set.shape[2]
-out_dim      = label_set.shape[1]
+        # Summary
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Engines",         len(ids))
+        c2.metric("⚠ Failure",       int(preds.sum()))
+        c3.metric("✅ Safe",          int((preds==0).sum()))
+        c4.metric("Avg probability", f"{probs.mean():.1%}")
 
-model = Sequential([
-    LSTM(units=100, input_shape=(sequence_length, features_dim), return_sequences=True),
-    Dropout(0.2),
-    LSTM(units=50, return_sequences=False),
-    Dropout(0.2),
-    Dense(units=out_dim, activation='sigmoid')
-])
-model.compile(loss='binary_crossentropy', optimizer='adam', metrics=['accuracy'])
-model.summary()
+        st.markdown("---")
 
-MODEL_PATH = 'binary_model.keras'   # native Keras format (recommended over .h5)
+        # Table
+        results = pd.DataFrame({
+            'Engine ID':        ids,
+            'Failure Prob (%)': (probs * 100).round(1),
+            'Prediction':       ['⚠ FAILURE' if p else '✅ SAFE' for p in preds]
+        })
+        st.dataframe(results, use_container_width=True, height=300)
 
-history = model.fit(
-    seq_set, label_set,
-    epochs=200, batch_size=200,
-    validation_split=0.05, verbose=2,
-    callbacks=[
-        EarlyStopping(monitor='val_loss', patience=10, mode='min'),
-        ModelCheckpoint(MODEL_PATH, monitor='val_loss', save_best_only=True, mode='min')
-    ]
-)
+        # Bar chart
+        fig, ax = plt.subplots(figsize=(12, 3))
+        colors  = ['#e74c3c' if p else '#2ecc71' for p in preds]
+        ax.bar(range(len(ids)), probs * 100, color=colors)
+        ax.axhline(50, color='orange', linestyle='--', linewidth=1, label='Threshold 50%')
+        ax.set_xlabel("Engine index")
+        ax.set_ylabel("Failure probability (%)")
+        ax.set_title("Failure Probability per Engine")
+        ax.legend()
+        st.pyplot(fig)
+        plt.close(fig)
 
-# ─────────────────────────────────────────
-# 6.  EVALUATE ON TEST SET
-# ─────────────────────────────────────────
-y_mask = [len(test_df[test_df['id']==id]) >= sequence_length for id in test_df['id'].unique()]
-last_test_seq = [test_df[test_df['id']==id][sequence_cols].values[-sequence_length:]
-                 for id in test_df['id'].unique() if len(test_df[test_df['id']==id]) >= sequence_length]
-last_test_seq   = np.asarray(last_test_seq).astype(np.float32)
-last_test_label = test_df.groupby('id')['failure_within_w1'].nth(-1)[y_mask].values
-last_test_label = last_test_label.reshape(-1, 1).astype(np.float32)
+        # Download
+        st.download_button("⬇ Download predictions (.csv)",
+                           results.to_csv(index=False).encode(),
+                           "predictions.csv", "text/csv")
+    else:
+        st.info("Upload a PM_test.txt file to get predictions.")
 
-estimator    = keras.models.load_model(MODEL_PATH)
-scores_test  = estimator.evaluate(last_test_seq, last_test_label, verbose=2)
-y_pred_test  = (estimator.predict(last_test_seq) > 0.5).astype("int32")
+# ─── TAB 2: EVALUATE ─────────────────────────────────────────────────────────
+with tab2:
+    st.subheader("Upload test + ground truth to evaluate model performance")
+    col1, col2 = st.columns(2)
+    with col1:
+        test_f  = st.file_uploader("PM_test.txt",  type=["txt","csv"], key="ev_test")
+    with col2:
+        truth_f = st.file_uploader("PM_truth.txt", type=["txt","csv"], key="ev_truth")
 
-precision = precision_score(last_test_label, y_pred_test)
-recall    = recall_score(last_test_label,    y_pred_test)
-f1        = 2 * precision * recall / (precision + recall)
+    if test_f and truth_f:
+        raw_test  = pd.read_csv(test_f,  sep=r"\s+", header=None)
+        raw_truth = pd.read_csv(truth_f, sep=r"\s+", header=None)
+        raw_test.dropna(axis=1, inplace=True)
+        raw_truth.dropna(axis=1, inplace=True)
 
-print(f"\n✅ Test Accuracy : {scores_test[1]:.4f}")
-print(f"   Precision     : {precision:.4f}")
-print(f"   Recall        : {recall:.4f}")
-print(f"   F1-Score      : {f1:.4f}")
-print(f"   Confusion Matrix:\n{confusion_matrix(last_test_label, y_pred_test)}")
+        df_test  = preprocess(raw_test)
+        truth_df = raw_truth.copy()
+        truth_df.columns = ['additional_rul']
+        truth_df['id']   = truth_df.index + 1
 
-# ─────────────────────────────────────────
-# 7.  SAVE SCALER  (needed by Streamlit app)
-# ─────────────────────────────────────────
-SCALER_PATH = 'scaler.pkl'
-with open(SCALER_PATH, 'wb') as f:
-    pickle.dump({
-        'scaler': min_max_scaler,
-        'cols_normalize': list(cols_normalize),
-        'sequence_cols': sequence_cols,
-        'sequence_length': sequence_length,
-        'w1': w1
-    }, f)
+        rul_max = df_test.groupby('id')['cycle'].max().reset_index()
+        rul_max.columns = ['id','max']
+        truth_df['max'] = rul_max['max'] + truth_df['additional_rul']
+        truth_df.drop('additional_rul', axis=1, inplace=True)
 
-print(f"\n💾 Model  saved → {MODEL_PATH}")
-print(f"💾 Scaler saved → {SCALER_PATH}")
-print("\nYou can now run:  streamlit run app.py")
+        df_test = df_test.merge(truth_df, on=['id'], how='left')
+        df_test['RUL'] = df_test['max'] - df_test['cycle']
+        df_test.drop('max', axis=1, inplace=True)
+        df_test['failure_within_w1'] = np.where(df_test['RUL'] <= W1, 1, 0)
+
+        y_mask = [len(df_test[df_test['id']==i]) >= SEQUENCE_LENGTH
+                  for i in df_test['id'].unique()]
+        seqs   = [df_test[df_test['id']==i][SEQUENCE_COLS].values[-SEQUENCE_LENGTH:]
+                  for i in df_test['id'].unique()
+                  if len(df_test[df_test['id']==i]) >= SEQUENCE_LENGTH]
+        seqs   = np.asarray(seqs).astype(np.float32)
+
+        y_true = df_test.groupby('id')['failure_within_w1'].nth(-1)[y_mask].values.reshape(-1,1)
+        probs, preds = predict(seqs)
+        preds  = preds.reshape(-1,1)
+
+        acc  = float((preds == y_true).mean())
+        prec = precision_score(y_true, preds)
+        rec  = recall_score(y_true, preds)
+        f1   = f1_score(y_true, preds)
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Accuracy",  f"{acc:.3f}")
+        c2.metric("Precision", f"{prec:.3f}")
+        c3.metric("Recall",    f"{rec:.3f}")
+        c4.metric("F1-Score",  f"{f1:.3f}")
+
+        st.markdown("---")
+
+        col_a, col_b = st.columns(2)
+        with col_a:
+            st.markdown("**Confusion Matrix**")
+            fig, ax = plt.subplots()
+            sns.heatmap(confusion_matrix(y_true, preds), annot=True, fmt='d',
+                        xticklabels=['Pred: Safe','Pred: Fail'],
+                        yticklabels=['True: Safe','True: Fail'], ax=ax)
+            st.pyplot(fig)
+            plt.close(fig)
+
+        with col_b:
+            st.markdown("**Score Distribution**")
+            fig, ax = plt.subplots()
+            ax.hist(probs[y_true.flatten()==0]*100, bins=20, alpha=0.7, color='green', label='Safe')
+            ax.hist(probs[y_true.flatten()==1]*100, bins=20, alpha=0.7, color='red',   label='Failure')
+            ax.axvline(50, color='orange', linestyle='--')
+            ax.set_xlabel("Failure probability (%)")
+            ax.legend()
+            st.pyplot(fig)
+            plt.close(fig)
+
+    else:
+        st.info("Upload both files to evaluate.")
