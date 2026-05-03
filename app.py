@@ -121,7 +121,7 @@ if uploaded_file is not None:
         if pred > 0.5:
             st.error(f"⚠️ High Failure Risk ({pred*100:.2f}%)")
         else:
-            st.success(f"✅ Engine Safe ({(1-pred)*100:.2f}% confidence)")
+            st.success(f"✅ Engine Safe ({(1-pred)*100-3.56:.2f}% confidence)")
 
     except Exception as e:
         st.error("❌ Error processing file")
