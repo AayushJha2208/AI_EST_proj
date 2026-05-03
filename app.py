@@ -1,5 +1,6 @@
 import streamlit as st
 import numpy as np
+import pandas as pd
 import pickle
 import tensorflow as tf
 from tensorflow.keras.models import Sequential
@@ -8,44 +9,25 @@ from tensorflow.keras.layers import LSTM, Dropout, Dense
 # -----------------------------
 # Page Config
 # -----------------------------
-st.set_page_config(
-    page_title="Engine Failure Predictor",
-    page_icon="⚙️",
-    layout="centered"
-)
+st.set_page_config(page_title="Engine Failure Predictor", page_icon="⚙️")
+
+st.title("⚙️ Engine Failure Prediction")
+st.caption("Upload engine data file to predict failure risk")
 
 # -----------------------------
-# UI Theme
-# -----------------------------
-st.markdown("""
-<style>
-.stApp { background-color: #f5feff; }
-.title { color: #00c2d1; text-align: center; font-size: 36px; font-weight: bold; }
-.subtitle { text-align: center; color: #555; }
-</style>
-""", unsafe_allow_html=True)
-
-st.markdown('<div class="title">⚙️ Engine Failure Prediction</div>', unsafe_allow_html=True)
-st.markdown('<div class="subtitle">Demo using simulated sequence input</div>', unsafe_allow_html=True)
-
-# -----------------------------
-# Build Model Architecture (IMPORTANT)
+# Model Architecture
 # -----------------------------
 def build_model(input_shape):
     model = Sequential()
-
     model.add(LSTM(100, return_sequences=True, input_shape=input_shape))
     model.add(Dropout(0.2))
-
     model.add(LSTM(50))
     model.add(Dropout(0.2))
-
     model.add(Dense(1, activation='sigmoid'))
-
     return model
 
 # -----------------------------
-# Load Assets
+# Load assets
 # -----------------------------
 @st.cache_resource
 def load_assets():
@@ -56,7 +38,7 @@ def load_assets():
     sequence_length = data["sequence_length"]
 
     model = build_model((sequence_length, len(sequence_cols)))
-    model.load_weights("model.h5")
+    model.load_weights("model_weights.h5")
 
     return model, data
 
@@ -67,44 +49,82 @@ sequence_cols = data["sequence_cols"]
 sequence_length = data["sequence_length"]
 
 # -----------------------------
-# Inputs
+# Instructions
 # -----------------------------
-st.markdown("### 🔢 Input Parameters")
+st.markdown("### 📄 Upload Input File")
 
-s2 = st.slider("Sensor s2", 0.0, 1.0, 0.5)
-cycle = st.slider("Cycle", 1, 300, 100)
+st.info("""
+Upload a `.txt` file containing engine sensor data.
+
+Format requirements:
+- Space-separated values (like training dataset)
+- Must include ALL required columns:
+    id, cycle, setting1, setting2, setting3, s1...s21
+- File must contain at least 50 rows
+""")
+
+uploaded_file = st.file_uploader("Upload .txt file", type=["txt"])
 
 # -----------------------------
 # Prediction
 # -----------------------------
-if st.button("🚀 Predict"):
-
+if uploaded_file is not None:
     try:
-        input_dict = {col: 0 for col in sequence_cols}
+        # Load txt file (space separated)
+        df = pd.read_csv(uploaded_file, sep=" ", header=None)
 
-        if "s2" in input_dict:
-            input_dict["s2"] = s2
-        if "cycle_norm" in input_dict:
-            input_dict["cycle_norm"] = cycle
+        # Drop empty columns (important)
+        df.dropna(axis=1, inplace=True)
 
-        row = np.array([list(input_dict.values())], dtype=float)
-        row_scaled = scaler.transform(row)
+        # Column names (same as training)
+        cols_names = [
+            'id','cycle','setting1','setting2','setting3',
+            's1','s2','s3','s4','s5','s6','s7','s8','s9','s10',
+            's11','s12','s13','s14','s15','s16','s17','s18','s19','s20','s21'
+        ]
 
-        seq = np.repeat(row_scaled, sequence_length, axis=0)
-        seq = seq.reshape(1, sequence_length, len(sequence_cols))
+        df.columns = cols_names
 
-        pred = float(model.predict(seq, verbose=0)[0][0])
+        st.success("✅ File loaded successfully")
 
-        st.markdown("### 📊 Prediction Result")
-        st.progress(pred)
+        # -----------------------------
+        # Preprocessing
+        # -----------------------------
+        # Add cycle_norm
+        df["cycle_norm"] = df["cycle"]
 
-        if pred > 0.5:
-            st.error(f"⚠️ High Failure Risk ({pred*100:.2f}%)")
+        # Keep only required columns
+        df_input = df[sequence_cols]
+
+        # Normalize
+        df_scaled = scaler.transform(df_input)
+
+        # Take last 50 rows
+        if len(df_scaled) < sequence_length:
+            st.error("❌ File must contain at least 50 rows")
         else:
-            st.success(f"✅ Engine Safe ({(1-pred)*100:.2f}% confidence)")
+            seq = df_scaled[-sequence_length:]
+            seq = seq.reshape(1, sequence_length, len(sequence_cols))
+
+            # -----------------------------
+            # Prediction
+            # -----------------------------
+            pred = float(model.predict(seq, verbose=0)[0][0])
+
+            st.markdown("### 📊 Prediction Result")
+
+            st.progress(pred)
+
+            if pred > 0.5:
+                st.error(f"⚠️ High Failure Risk ({pred*100:.2f}%)")
+            else:
+                st.success(f"✅ Engine Safe ({(1-pred)*100:.2f}% confidence)")
 
     except Exception as e:
-        st.error("❌ Prediction failed")
+        st.error("❌ Error processing file")
         st.text(str(e))
 
-st.caption("Demo project using LSTM with simulated input")
+# -----------------------------
+# Footer
+# -----------------------------
+st.caption("Model predicts failure within next 30 cycles based on last 50 timesteps")
