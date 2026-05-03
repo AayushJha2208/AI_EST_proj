@@ -91,13 +91,22 @@ if uploaded_file is not None:
         # Preprocessing
         # -----------------------------
         # Add cycle_norm
+        # Add cycle_norm
         df["cycle_norm"] = df["cycle"]
-
-        # Keep only required columns
-        df_input = df[sequence_cols]
-
-        # Normalize
-        df_scaled = scaler.transform(df_input)
+        
+        # Validate columns
+        missing_cols = [col for col in sequence_cols if col not in df.columns]
+        if missing_cols:
+            st.error(f"❌ Missing columns: {missing_cols}")
+            st.stop()
+        
+        # Correct order
+        df_input = df[sequence_cols].copy()
+        
+        # Scale only required columns
+        cols_norm = data["cols_normalize"]
+        df_input[cols_norm] = scaler.transform(df_input[cols_norm])
+        
 
         # Take last 50 rows
         if len(df_scaled) < sequence_length:
