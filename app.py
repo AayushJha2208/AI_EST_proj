@@ -71,7 +71,7 @@ uploaded_file = st.file_uploader("Upload .txt file", type=["txt"])
 if uploaded_file is not None:
     try:
         # Load txt file (space separated)
-        df = pd.read_csv(uploaded_file, sep=" ", header=None)
+        df = pd.read_csv(uploaded_file, sep=r"\s+", header=None)
 
         # Drop empty columns (important)
         df.dropna(axis=1, inplace=True)
