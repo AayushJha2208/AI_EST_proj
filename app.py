@@ -39,7 +39,7 @@ st.markdown('<div class="sub-text">Demo using simulated sequence input</div>', u
 # -----------------------------
 @st.cache_resource
 def load_assets():
-    model = load_model("binary_model.keras")
+    model = load_model("binary_model.keras", compile=False)
     with open("scaler.pkl", "rb") as f:
         data = pickle.load(f)
     return model, data
