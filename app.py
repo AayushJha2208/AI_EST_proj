@@ -38,7 +38,7 @@ def load_assets():
     sequence_length = data["sequence_length"]
 
     model = build_model((sequence_length, len(sequence_cols)))
-    model.load_weights("model.h5")
+    model.load_weights("model.weights.h5")
 
     return model, data
 
