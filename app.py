@@ -1,120 +1,475 @@
+# app.py  –  Streamlit frontend for Predictive Maintenance LSTM
+# Run with:  streamlit run app.py
+
 import streamlit as st
 import numpy as np
+import pandas as pd
 import pickle
-from tensorflow.keras.models import load_model
+import os
+import io
+import time
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+import seaborn as sns
+from sklearn.metrics import confusion_matrix, precision_score, recall_score, f1_score
 
-st.set_page_config(page_title="Predictive Maintenance", page_icon="⚙️", layout="wide")
+# ── Page config ──────────────────────────────────────────────────────────────
+st.set_page_config(
+    page_title="PredictiveMaint · LSTM",
+    page_icon="⚙️",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+# ── Custom CSS ────────────────────────────────────────────────────────────────
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@300;400;600&display=swap');
+
+html, body, [class*="css"] {
+    font-family: 'IBM Plex Sans', sans-serif;
+}
+
+/* ── sidebar ── */
+[data-testid="stSidebar"] {
+    background: #0d1117;
+    border-right: 1px solid #21262d;
+}
+[data-testid="stSidebar"] * { color: #c9d1d9 !important; }
+[data-testid="stSidebar"] .stMarkdown h2 {
+    color: #58a6ff !important;
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 0.85rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    border-bottom: 1px solid #21262d;
+    padding-bottom: 0.4rem;
+    margin-bottom: 0.8rem;
+}
+
+/* ── main area ── */
+.stApp { background: #010409; color: #c9d1d9; }
+
+/* Metric cards */
+div[data-testid="metric-container"] {
+    background: #0d1117;
+    border: 1px solid #21262d;
+    border-radius: 8px;
+    padding: 1rem 1.25rem;
+}
+div[data-testid="metric-container"] label { color: #8b949e !important; font-size: 0.75rem; letter-spacing: 0.08em; text-transform: uppercase; }
+div[data-testid="metric-container"] div[data-testid="stMetricValue"] { color: #58a6ff !important; font-family: 'IBM Plex Mono', monospace; font-size: 1.6rem; }
+
+/* Headers */
+h1 { font-family: 'IBM Plex Mono', monospace !important; color: #e6edf3 !important; font-size: 1.6rem !important; letter-spacing: -0.02em; }
+h2, h3 { font-family: 'IBM Plex Mono', monospace !important; color: #58a6ff !important; font-size: 1.0rem !important; text-transform: uppercase; letter-spacing: 0.1em; }
+
+/* Tabs */
+button[data-baseweb="tab"] { font-family: 'IBM Plex Mono', monospace; font-size: 0.78rem; letter-spacing: 0.06em; text-transform: uppercase; color: #8b949e !important; background: transparent !important; border-bottom: 2px solid transparent !important; }
+button[data-baseweb="tab"][aria-selected="true"] { color: #58a6ff !important; border-bottom-color: #58a6ff !important; }
+
+/* Buttons */
+.stButton > button {
+    background: #161b22 !important;
+    color: #58a6ff !important;
+    border: 1px solid #30363d !important;
+    border-radius: 6px !important;
+    font-family: 'IBM Plex Mono', monospace !important;
+    font-size: 0.78rem !important;
+    letter-spacing: 0.06em !important;
+    text-transform: uppercase !important;
+    transition: all 0.2s !important;
+}
+.stButton > button:hover {
+    background: #21262d !important;
+    border-color: #58a6ff !important;
+}
+
+/* File uploader */
+[data-testid="stFileUploaderDropzone"] {
+    background: #0d1117 !important;
+    border: 1px dashed #30363d !important;
+    border-radius: 8px !important;
+}
+
+/* Alert boxes */
+div[data-testid="stAlert"] { border-radius: 6px !important; }
+
+/* Dividers */
+hr { border-color: #21262d !important; }
+
+/* DataFrames */
+[data-testid="stDataFrame"] { border: 1px solid #21262d; border-radius: 8px; }
+
+/* Number input */
+input[type="number"] { background: #0d1117 !important; color: #c9d1d9 !important; border-color: #30363d !important; }
+</style>
+""", unsafe_allow_html=True)
 
 # ── Load model + scaler ───────────────────────────────────────────────────────
 @st.cache_resource(show_spinner=False)
 def load_assets():
-    model  = load_model("model.h5", compile=False)
-    with open("scaler.pkl", "rb") as f:
-        scaler = pickle.load(f)
-    return model, scaler
+    errors = []
+    model, meta = None, None
 
-model, scaler = load_assets()
+    # Model – try .keras first, fall back to .h5
+    for path in ['binary_model.keras', 'binary_model.h5']:
+        if os.path.isfile(path):
+            try:
+                from tensorflow.keras.models import load_model
+                model = load_model(path)
+                break
+            except Exception as e:
+                errors.append(f"Model load error ({path}): {e}")
 
-SEQUENCE_LENGTH = 50
+    # Scaler
+    if os.path.isfile('scaler.pkl'):
+        try:
+            with open('scaler.pkl', 'rb') as f:
+                meta = pickle.load(f)
+        except Exception as e:
+            errors.append(f"Scaler load error: {e}")
 
-# ── Page ──────────────────────────────────────────────────────────────────────
-st.title("⚙️ Predictive Maintenance — LSTM")
-st.caption("Enter current sensor readings to predict if the engine will fail within 30 cycles.")
-st.markdown("---")
+    return model, meta, errors
 
-# ── Sidebar info ──────────────────────────────────────────────────────────────
+model, meta, load_errors = load_assets()
+assets_ready = model is not None and meta is not None
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+SEQUENCE_LENGTH = meta['sequence_length'] if assets_ready else 50
+SEQUENCE_COLS   = meta['sequence_cols']   if assets_ready else []
+W1              = meta['w1']              if assets_ready else 30
+
+def preprocess_df(raw_df: pd.DataFrame):
+    """Full preprocessing pipeline identical to training."""
+    df = raw_df.copy()
+
+    required_cols = ['id','cycle','setting1','setting2','setting3'] + [f's{i}' for i in range(1,22)]
+    if list(df.columns) != required_cols:
+        df.columns = required_cols[:len(df.columns)]
+
+    df.sort_values(['id','cycle'], inplace=True)
+
+    df['cycle_norm'] = df['cycle']
+
+    scaler         = meta['scaler']
+    cols_normalize = meta['cols_normalize']
+
+    norm_df = pd.DataFrame(
+        scaler.transform(df[cols_normalize]),
+        columns=cols_normalize, index=df.index)
+    other_cols = df.columns.difference(cols_normalize)
+    df = df[other_cols].join(norm_df)
+
+    return df
+
+def make_sequences(df: pd.DataFrame):
+    """Return (sequences, ids_with_enough_data)."""
+    seqs, ids = [], []
+    for eng_id in df['id'].unique():
+        eng_df = df[df['id'] == eng_id]
+        if len(eng_df) >= SEQUENCE_LENGTH:
+            seqs.append(eng_df[SEQUENCE_COLS].values[-SEQUENCE_LENGTH:])
+            ids.append(eng_id)
+    return np.asarray(seqs).astype(np.float32), ids
+
+def predict_from_sequences(sequences):
+    probs = model.predict(sequences, verbose=0)
+    preds = (probs > 0.5).astype(int)
+    return probs.flatten(), preds.flatten()
+
+def make_fig_dark():
+    """Return a matplotlib figure with dark background matching the app."""
+    fig, ax = plt.subplots(facecolor='#0d1117')
+    ax.set_facecolor('#0d1117')
+    for spine in ax.spines.values():
+        spine.set_edgecolor('#30363d')
+    ax.tick_params(colors='#8b949e')
+    ax.xaxis.label.set_color('#8b949e')
+    ax.yaxis.label.set_color('#8b949e')
+    ax.title.set_color('#c9d1d9')
+    return fig, ax
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  SIDEBAR
+# ══════════════════════════════════════════════════════════════════════════════
 with st.sidebar:
-    st.markdown("## ℹ️ How it works")
-    st.markdown("""
-1. Enter the **current sensor values** for the engine
-2. Click **Predict**
-3. The model will tell you if the engine is likely to fail within the next **30 cycles**
+    st.markdown("## ⚙️ System Status")
 
-> Sensor values should be in their **raw/original scale** — the app normalizes them automatically.
-""")
+    if assets_ready:
+        st.success("Model loaded ✓")
+        st.success("Scaler loaded ✓")
+        st.markdown(f"**Sequence length:** `{SEQUENCE_LENGTH}`")
+        st.markdown(f"**Failure window (w1):** `{W1}` cycles")
+        st.markdown(f"**Features:** `{len(SEQUENCE_COLS)}`")
+    else:
+        st.error("Assets not found")
+        for err in load_errors:
+            st.caption(err)
+        st.info("Run `train_and_save_model.py` first, then place `binary_model.keras` and `scaler.pkl` alongside `app.py`.")
+
     st.markdown("---")
-    st.markdown("**Tip:** Use values from your test dataset for realistic results.")
+    st.markdown("## 📋 Input Format")
+    st.markdown("""
+Upload a **space-separated `.txt`** file with columns:
 
-# ── Operational settings ──────────────────────────────────────────────────────
-st.subheader("⚙️ Operational Settings")
-col1, col2, col3, col4 = st.columns(4)
-with col1:
-    setting1   = st.number_input("Setting 1",   value=0.0,  step=0.1, format="%.2f")
-with col2:
-    setting2   = st.number_input("Setting 2",   value=0.0,  step=0.1, format="%.2f")
-with col3:
-    setting3   = st.number_input("Setting 3",   value=0.0,  step=0.1, format="%.2f")
-with col4:
-    cycle_norm = st.number_input("Cycle (norm)", value=100.0, step=1.0, format="%.1f")
+`id · cycle · setting1–3 · s1–s21`
 
+No header row. Same format as `PM_test.txt`.
+""")
+
+    st.markdown("---")
+    st.markdown("## 🔗 About")
+    st.caption("Predictive Maintenance · LSTM Classifier  \nBuilt with TensorFlow + Streamlit")
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  MAIN
+# ══════════════════════════════════════════════════════════════════════════════
+st.markdown("# ⚙️ Predictive Maintenance · LSTM")
+st.markdown("*Binary classification — will the engine fail within the next **30 cycles**?*")
 st.markdown("---")
 
-# ── Sensor inputs ─────────────────────────────────────────────────────────────
-st.subheader("🔬 Sensor Readings")
+if not assets_ready:
+    st.warning("⚠️  Model or scaler not found. See sidebar for instructions.")
+    st.stop()
 
-# Row 1: s1 - s7
-cols = st.columns(7)
-sensors = {}
-for i, col in enumerate(cols, start=1):
-    sensors[f's{i}'] = col.number_input(f"s{i}", value=0.5, step=0.01, format="%.3f")
+tab1, tab2, tab3 = st.tabs(["🔍  Predict", "📊  Evaluate", "📖  How It Works"])
 
-# Row 2: s8 - s14
-cols = st.columns(7)
-for i, col in enumerate(cols, start=8):
-    sensors[f's{i}'] = col.number_input(f"s{i}", value=0.5, step=0.01, format="%.3f")
+# ─────────────────────────────────────────────────────────────────────────────
+#  TAB 1 – PREDICT
+# ─────────────────────────────────────────────────────────────────────────────
+with tab1:
+    st.markdown("### Upload Test Data")
 
-# Row 3: s15 - s21
-cols = st.columns(7)
-for i, col in enumerate(cols, start=15):
-    sensors[f's{i}'] = col.number_input(f"s{i}", value=0.5, step=0.01, format="%.3f")
+    uploaded = st.file_uploader(
+        "Drop a space-separated .txt file (PM_test format)",
+        type=["txt", "csv"],
+        key="predict_upload"
+    )
 
-st.markdown("---")
+    if uploaded:
+        with st.spinner("Processing…"):
+            raw = pd.read_csv(uploaded, sep=r"\s+", header=None)
+            raw.dropna(axis=1, inplace=True)
 
-# ── Predict button ────────────────────────────────────────────────────────────
-if st.button("🔍 Predict", use_container_width=True):
+            try:
+                df_proc  = preprocess_df(raw)
+                seqs, ids = make_sequences(df_proc)
+            except Exception as e:
+                st.error(f"Preprocessing failed: {e}")
+                st.stop()
 
-    # Build one feature vector from user inputs
-    # Order: setting1, setting2, setting3, cycle_norm, s1..s21  (25 features)
-    single_step = np.array([[
-        setting1, setting2, setting3, cycle_norm,
-        sensors['s1'],  sensors['s2'],  sensors['s3'],  sensors['s4'],
-        sensors['s5'],  sensors['s6'],  sensors['s7'],  sensors['s8'],
-        sensors['s9'],  sensors['s10'], sensors['s11'], sensors['s12'],
-        sensors['s13'], sensors['s14'], sensors['s15'], sensors['s16'],
-        sensors['s17'], sensors['s18'], sensors['s19'], sensors['s20'],
-        sensors['s21']
-    ]])  # shape (1, 25)
+            if len(seqs) == 0:
+                st.warning(f"No engine has ≥ {SEQUENCE_LENGTH} cycles. Cannot predict.")
+                st.stop()
 
-    # Normalize using the saved scaler
-    single_step_scaled = scaler.transform(single_step)  # shape (1, 25)
+            probs, preds = predict_from_sequences(seqs)
 
-    # Build fake sequence by repeating the same timestep 50 times
-    # shape → (1, 50, 25)
-    sequence = np.tile(single_step_scaled, (SEQUENCE_LENGTH, 1))
-    sequence = sequence.reshape(1, SEQUENCE_LENGTH, 25).astype(np.float32)
+        # ── Summary metrics ──
+        n_fail = int(preds.sum())
+        n_ok   = len(preds) - n_fail
+        avg_p  = float(probs.mean())
 
-    # Predict
-    prob = model.predict(sequence, verbose=0)[0][0]
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Engines evaluated", len(ids))
+        c2.metric("⚠️  Failure predicted", n_fail)
+        c3.metric("✅  Safe", n_ok)
+        c4.metric("Avg failure probability", f"{avg_p:.1%}")
 
-    # ── Output ────────────────────────────────────────────────────────────────
-    st.markdown("## 📊 Prediction Result")
+        st.markdown("---")
 
-    c1, c2 = st.columns(2)
-    c1.metric("Failure Probability", f"{prob*100:.1f}%")
-    c2.metric("Decision Threshold",  "50%")
+        # ── Per-engine results table ──
+        results = pd.DataFrame({
+            'Engine ID':          ids,
+            'Failure Prob (%)':   (probs * 100).round(1),
+            'Prediction':         ['⚠️ FAILURE' if p == 1 else '✅ SAFE' for p in preds],
+        })
+        st.markdown("### Per-Engine Predictions")
+        st.dataframe(results, use_container_width=True, height=300)
 
-    st.progress(float(prob))
+        # ── Probability bar chart ──
+        st.markdown("### Failure Probability by Engine")
+        fig, ax = make_fig_dark()
+        colors  = ['#f85149' if p == 1 else '#3fb950' for p in preds]
+        ax.bar(range(len(ids)), probs * 100, color=colors, width=0.6)
+        ax.axhline(50, color='#e3b341', linestyle='--', linewidth=1.2, label='Decision threshold (50%)')
+        ax.set_xlabel("Engine index")
+        ax.set_ylabel("Failure probability (%)")
+        ax.set_title("Failure Probability per Engine")
+        ax.legend(facecolor='#161b22', edgecolor='#30363d', labelcolor='#c9d1d9')
+        fig.tight_layout()
+        st.pyplot(fig)
+        plt.close(fig)
 
-    if prob > 0.5:
-        st.error(f"⚠️ Engine is likely to **FAIL** within 30 cycles  (confidence: {prob*100:.1f}%)")
+        # ── Download button ──
+        csv = results.to_csv(index=False).encode()
+        st.download_button("⬇  Download predictions (.csv)", csv, "predictions.csv", "text/csv")
+
     else:
-        st.success(f"✅ Engine is **SAFE**  (failure probability: {prob*100:.1f}%)")
+        st.info("Upload a test file to get predictions.")
 
-    # Probability gauge bar
-    st.markdown("### Risk Level")
-    if prob < 0.33:
-        st.markdown("🟢 **Low risk**")
-    elif prob < 0.66:
-        st.markdown("🟡 **Medium risk**")
+# ─────────────────────────────────────────────────────────────────────────────
+#  TAB 2 – EVALUATE (test + ground truth)
+# ─────────────────────────────────────────────────────────────────────────────
+with tab2:
+    st.markdown("### Upload Test + Ground-Truth Files")
+    col_a, col_b = st.columns(2)
+    with col_a:
+        test_file  = st.file_uploader("PM_test.txt",  type=["txt","csv"], key="eval_test")
+    with col_b:
+        truth_file = st.file_uploader("PM_truth.txt", type=["txt","csv"], key="eval_truth")
+
+    if test_file and truth_file:
+        with st.spinner("Evaluating…"):
+            # ── load & preprocess test ──
+            raw_test = pd.read_csv(test_file,  sep=r"\s+", header=None)
+            raw_test.dropna(axis=1, inplace=True)
+            raw_truth = pd.read_csv(truth_file, sep=r"\s+", header=None)
+            raw_truth.dropna(axis=1, inplace=True)
+
+            df_test   = preprocess_df(raw_test)
+            truth_df  = raw_truth.copy()
+            truth_df.columns = ['additional_rul']
+            truth_df['id']   = truth_df.index + 1
+
+            rul_max = pd.DataFrame(df_test.groupby('id')['cycle'].max()).reset_index()
+            rul_max.columns = ['id','max']
+            truth_df['max'] = rul_max['max'] + truth_df['additional_rul']
+            truth_df.drop('additional_rul', axis=1, inplace=True)
+
+            df_test = df_test.merge(truth_df, on=['id'], how='left')
+            df_test['RUL'] = df_test['max'] - df_test['cycle']
+            df_test.drop('max', axis=1, inplace=True)
+            df_test['failure_within_w1'] = np.where(df_test['RUL'] <= W1, 1, 0)
+
+            y_mask = [len(df_test[df_test['id']==i]) >= SEQUENCE_LENGTH
+                      for i in df_test['id'].unique()]
+            seqs = [df_test[df_test['id']==i][SEQUENCE_COLS].values[-SEQUENCE_LENGTH:]
+                    for i in df_test['id'].unique()
+                    if len(df_test[df_test['id']==i]) >= SEQUENCE_LENGTH]
+            seqs = np.asarray(seqs).astype(np.float32)
+
+            y_true = df_test.groupby('id')['failure_within_w1'].nth(-1)[y_mask].values.reshape(-1,1)
+            probs, preds = predict_from_sequences(seqs)
+            preds = preds.reshape(-1,1)
+
+        # ── Metrics ──
+        acc  = float((preds == y_true).mean())
+        prec = precision_score(y_true, preds)
+        rec  = recall_score(y_true, preds)
+        f1   = f1_score(y_true, preds)
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Accuracy",  f"{acc:.3f}")
+        c2.metric("Precision", f"{prec:.3f}")
+        c3.metric("Recall",    f"{rec:.3f}")
+        c4.metric("F1-Score",  f"{f1:.3f}")
+
+        st.markdown("---")
+
+        col_left, col_right = st.columns(2)
+
+        # ── Confusion matrix ──
+        with col_left:
+            st.markdown("### Confusion Matrix")
+            cm = confusion_matrix(y_true, preds)
+            fig, ax = make_fig_dark()
+            sns.heatmap(cm, annot=True, fmt='d', ax=ax,
+                        cmap='Blues',
+                        xticklabels=['Pred: Safe','Pred: Fail'],
+                        yticklabels=['True: Safe','True: Fail'],
+                        linewidths=1, linecolor='#21262d')
+            ax.tick_params(colors='#c9d1d9')
+            fig.tight_layout()
+            st.pyplot(fig)
+            plt.close(fig)
+
+        # ── Probability distribution ──
+        with col_right:
+            st.markdown("### Probability Distribution")
+            fig, ax = make_fig_dark()
+            ax.hist(probs[y_true.flatten()==0]*100, bins=20, alpha=0.7, color='#3fb950', label='True: Safe')
+            ax.hist(probs[y_true.flatten()==1]*100, bins=20, alpha=0.7, color='#f85149', label='True: Fail')
+            ax.axvline(50, color='#e3b341', linestyle='--', linewidth=1.2, label='Threshold')
+            ax.set_xlabel("Failure probability (%)")
+            ax.set_ylabel("Count")
+            ax.set_title("Score Distribution")
+            ax.legend(facecolor='#161b22', edgecolor='#30363d', labelcolor='#c9d1d9')
+            fig.tight_layout()
+            st.pyplot(fig)
+            plt.close(fig)
+
+        # ── Predicted vs Actual timeline ──
+        st.markdown("### Prediction Timeline")
+        fig, ax = make_fig_dark()
+        ax.plot(probs * 100, color='#58a6ff', linewidth=1.2, label='Predicted prob (%)')
+        ax.plot(y_true.flatten() * 100, color='#3fb950', linewidth=1.2, alpha=0.7, label='Actual label')
+        ax.axhline(50, color='#e3b341', linestyle='--', linewidth=1, label='Threshold')
+        ax.set_xlabel("Engine index")
+        ax.set_ylabel("Value")
+        ax.set_title("Predicted Probability vs Actual Labels")
+        ax.legend(facecolor='#161b22', edgecolor='#30363d', labelcolor='#c9d1d9')
+        fig.tight_layout()
+        st.pyplot(fig)
+        plt.close(fig)
+
     else:
-        st.markdown("🔴 **High risk**")
+        st.info("Upload both files to run evaluation.")
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  TAB 3 – HOW IT WORKS
+# ─────────────────────────────────────────────────────────────────────────────
+with tab3:
+    st.markdown("### Architecture")
+    st.markdown("""
+```
+Input  (batch, 50 time-steps, 25 features)
+  │
+  ▼
+LSTM  (100 units, return_sequences=True)
+  │
+Dropout 0.2
+  │
+  ▼
+LSTM  (50 units, return_sequences=False)
+  │
+Dropout 0.2
+  │
+  ▼
+Dense  (1 unit, sigmoid)
+  │
+  ▼
+Output  P(failure within next 30 cycles)
+```
+""")
+
+    st.markdown("### Feature Set (25 columns)")
+    feat_df = pd.DataFrame({
+        "Column":      ['setting1','setting2','setting3','cycle_norm'] + [f's{i}' for i in range(1,22)],
+        "Description": ['Operational setting 1','Operational setting 2','Operational setting 3','Normalised cycle counter'] +
+                       [f'Sensor reading {i}' for i in range(1,22)],
+    })
+    st.dataframe(feat_df, use_container_width=True, hide_index=True)
+
+    st.markdown("### Training Details")
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("""
+| Parameter | Value |
+|-----------|-------|
+| Sequence length | 50 cycles |
+| Failure window (w1) | 30 cycles |
+| Loss | Binary cross-entropy |
+| Optimizer | Adam |
+| Max epochs | 200 |
+""")
+    with col2:
+        st.markdown("""
+| Parameter | Value |
+|-----------|-------|
+| Batch size | 200 |
+| Early stopping patience | 10 |
+| Validation split | 5 % |
+| Normalization | MinMax [0, 1] |
+| Dataset | CMAPSS (NASA) |
+""")
